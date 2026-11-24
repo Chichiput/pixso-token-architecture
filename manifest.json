@@ -1,0 +1,7 @@
+{
+  "name": "Архитектура токенов",
+  "id": "pixso-token-architecture",
+  "editorType": ["pixso"],
+  "main": "./main.js",
+  "ui": "./ui.html"
+}

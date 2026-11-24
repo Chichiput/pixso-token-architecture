@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Архитектура токенов</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --paper: #f8f7fb;
+      --ink: #221d30;
+      --muted: #61596e;
+      --line: #e4dfeb;
+      --accent: #5328c9;
+      --accent-light: #ece5fc;
+    }
+    * { box-sizing: border-box; }
+    body { height: 100vh; margin: 0; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--paper); color: var(--ink); }
+    header, footer { padding: 14px 22px; background: white; }
+    header { border-bottom: 1px solid var(--line); }
+    .heading, footer, .views { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { margin: 0; font-size: 24px; letter-spacing: -.045em; }
+    .stats, .status, .empty, .path, .description { color: var(--muted); }
+    .stats { margin: 2px 0 0; font-size: 12px; }
+    .views { justify-content: flex-start; margin: 13px 0; }
+    .views button { border: 0; padding: 6px 12px; background: transparent; color: var(--muted); }
+    .views button[aria-pressed="true"] { background: var(--accent-light); color: var(--accent); font-weight: 650; }
+    .filters { display: grid; grid-template-columns: 1.2fr 1fr 1.45fr; gap: 10px; }
+    label { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    button, input, select { border: 1px solid var(--line); border-radius: 7px; font: inherit; color: var(--ink); background: white; }
+    input, select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; font-size: 13px; }
+    button { padding: 7px 12px; cursor: pointer; }
+    button:disabled { cursor: default; opacity: .5; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    main { padding: 14px 22px; overflow: auto; }
+    .empty { text-align: center; padding: 24px 8px; }
+    .error { color: #a01e3c; }
+    details { margin: 3px 0; }
+    summary { cursor: pointer; padding: 5px 3px; font-size: 13px; font-weight: 650; overflow-wrap: anywhere; }
+    .children { padding-left: 10px; margin-left: 6px; border-left: 1px solid var(--line); }
+    .token { background: white; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; margin: 4px 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .9fr); gap: 4px 10px; overflow-wrap: anywhere; }
+    .name, .value { min-width: 0; }
+    .name { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+    .type { font-size: 10px; color: var(--accent); }
+    .value { display: flex; align-items: flex-start; gap: 6px; }
+    .path, .description { grid-column: 1 / -1; font-size: 11px; }
+    code, textarea { font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    code { white-space: pre-wrap; }
+    .swatch { width: 17px; height: 17px; flex: 0 0 17px; border-radius: 4px; border: 1px solid #221d3033; overflow: hidden; background: repeating-conic-gradient(#d9d5df 0 25%, white 0 50%) 0 / 8px 8px; }
+    .swatch span { display: block; height: 100%; }
+    #json { display: block; width: 100%; height: 100%; min-height: 120px; resize: none; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); white-space: pre; }
+    footer { border-top: 1px solid var(--line); }
+    .status { font-size: 12px; }
+    .export { white-space: nowrap; background: var(--accent); border-color: var(--accent); color: white; font-weight: 650; }
+    [hidden] { display: none !important; }
+    @media (max-width: 490px) {
+      header, footer, main { padding-left: 12px; padding-right: 12px; }
+      h1 { font-size: 20px; }
+      .filters { grid-template-columns: 1fr 1fr; }
+      .filters label:last-child { grid-column: 1 / -1; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="heading">
+      <div>
+        <h1>Архитектура токенов</h1>
+        <p class="stats" id="stats">Локальные переменные Pixso</p>
+      </div>
+      <button id="refresh">Обновить</button>
+    </div>
+    <nav class="views" aria-label="Вид предпросмотра">
+      <button id="tree-view" aria-pressed="true">Дерево токенов</button>
+      <button id="json-view" aria-pressed="false">JSON</button>
+    </nav>
+    <div class="filters" id="filters">
+      <label>Коллекция<select id="collection" disabled></select></label>
+      <label>Режим<select id="mode" disabled></select></label>
+      <label>Поиск<input id="search" type="search" placeholder="Имя, путь или описание" disabled></label>
+    </div>
+  </header>
+  <main>
+    <p class="empty" id="message" role="status">Загружаем переменные…</p>
+    <div id="tree"></div>
+    <textarea id="json" aria-label="Содержимое JSON-экспорта" spellcheck="false" wrap="off" readonly hidden></textarea>
+  </main>
+  <footer>
+    <span id="status" class="status" role="status"></span>
+    <button class="export" id="download" disabled>Скачать JSON</button>
+  </footer>
+  <script>
+    "use strict";
+
+    const byId = id => document.getElementById(id);
+    const elements = {
+      stats: byId("stats"), refresh: byId("refresh"), message: byId("message"),
+      treeView: byId("tree-view"), jsonView: byId("json-view"), filters: byId("filters"),
+      collection: byId("collection"), mode: byId("mode"), search: byId("search"),
+      tree: byId("tree"), json: byId("json"), status: byId("status"), download: byId("download")
+    };
+    const selectedModes = new Map();
+    let architecture;
+    let collections = new Map();
+    let tokens = new Map();
+    let activeView = "tree";
+    let loading = false;
+    let timer;
+    let requestId = 0;
+
+    function node(tag, className, value) {
+      const element = document.createElement(tag);
+      if (className) element.className = className;
+      if (value !== undefined) element.textContent = value;
+      return element;
+    }
+
+    function setOptions(select, items, selectedId, label = item => item.name) {
+      select.replaceChildren(...items.map(item => new Option(label(item), item.id)));
+      if (items.some(item => item.id === selectedId)) select.value = selectedId;
+      select.disabled = loading || !items.length;
+    }
+
+    function getModeId(collection) {
+      const selected = selectedModes.get(collection.id);
+      if (collection.modes.some(mode => mode.id === selected)) return selected;
+      return collection.modes.find(mode => mode.id === collection.defaultModeId)?.id ?? collection.modes[0]?.id;
+    }
+
+    function isAlias(value) {
+      return value?.type === "VARIABLE_ALIAS";
+    }
+
+    function qualifiedName(entry) {
+      return entry.collection.name + " / " + entry.token.name;
+    }
+
+    function resolveValue(entry) {
+      const chain = [];
+      const visited = new Set();
+      while (entry) {
+        const { collection, token } = entry;
+        if (visited.has(token.id)) return { chain, issue: "Циклическая ссылка" };
+        visited.add(token.id);
+        const value = token.valuesByMode[getModeId(collection)];
+        if (!isAlias(value)) {
+          return value === undefined ? { chain, issue: "Нет значения для режима" } : { chain, value };
+        }
+        entry = tokens.get(value.id);
+        chain.push(entry ? qualifiedName(entry) : value.id);
+      }
+      return { chain, issue: "Цель вне локальных коллекций или недоступна" };
+    }
+
+    function colorValue(value) {
+      const channel = component => Math.round(255 * Math.min(1, Math.max(0, component)));
+      const rgb = [value.r, value.g, value.b].map(channel);
+      const alpha = value.a ?? 1;
+      const hex = "#" + rgb.map(component => component.toString(16).padStart(2, "0")).join("").toUpperCase();
+      return {
+        css: "rgba(" + rgb.join(", ") + ", " + alpha + ")",
+        label: alpha === 1 ? hex : hex + " · α " + alpha.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")
+      };
+    }
+
+    function renderToken(token, collection) {
+      const row = node("div", "token");
+      const name = node("div", "name");
+      name.append(node("strong", "", token.path.at(-1) || token.name), node("span", "type", token.type));
+      const output = node("div", "value");
+      const { value, chain, issue } = resolveValue({ token, collection });
+      if (issue) {
+        output.append(node("span", "status", issue));
+      } else if (token.type === "COLOR" && value && [value.r, value.g, value.b].every(Number.isFinite)) {
+        const color = colorValue(value);
+        const swatch = node("span", "swatch");
+        swatch.setAttribute("aria-hidden", "true");
+        const fill = node("span");
+        fill.style.backgroundColor = color.css;
+        swatch.append(fill);
+        output.append(swatch, node("code", "", color.label));
+      } else {
+        output.append(node("code", "", typeof value === "string" ? JSON.stringify(value) : String(value)));
+      }
+      row.append(name, output);
+      if (chain.length) row.append(node("div", "path", "→ " + chain.join(" → ")));
+      if (token.description) row.append(node("div", "description", token.description));
+      return row;
+    }
+
+    function renderTree(collection) {
+      elements.tree.replaceChildren();
+      if (!collection) {
+        showMessage("В этом файле нет локальных коллекций переменных.");
+        return;
+      }
+
+      const query = elements.search.value.trim().toLowerCase();
+      const matching = collection.tokens.filter(token =>
+        [token.name, token.description, token.type].some(value => value?.toLowerCase().includes(query))
+      );
+      if (!matching.length) {
+        showMessage(query ? "По вашему запросу ничего не найдено." : "В этой коллекции нет переменных.");
+        return;
+      }
+
+      const tree = document.createDocumentFragment();
+      const groups = new Map();
+      for (const token of matching) {
+        let children = tree;
+        for (const [depth, segment] of token.path.slice(0, -1).entries()) {
+          const key = JSON.stringify(token.path.slice(0, depth + 1));
+          if (!groups.has(key)) {
+            const details = node("details");
+            details.open = Boolean(query) || depth < 2;
+            const group = node("div", "children");
+            details.append(node("summary", "", segment || "(без имени)"), group);
+            children.append(details);
+            groups.set(key, group);
+          }
+          children = groups.get(key);
+        }
+        children.append(renderToken(token, collection));
+      }
+      elements.tree.append(tree);
+    }
+
+    function showMessage(text, error = false) {
+      elements.message.textContent = text;
+      elements.message.classList.toggle("error", error);
+      elements.message.hidden = false;
+    }
+
+    function render() {
+      const collection = collections.get(elements.collection.value);
+      elements.treeView.setAttribute("aria-pressed", String(activeView === "tree"));
+      elements.jsonView.setAttribute("aria-pressed", String(activeView === "json"));
+      elements.filters.hidden = activeView === "json";
+      elements.tree.hidden = activeView === "json" || loading || !architecture;
+      elements.json.hidden = activeView === "tree" || loading || !architecture;
+      elements.message.hidden = Boolean(architecture) && !loading;
+      if (loading || !architecture) return;
+
+      setOptions(elements.mode, collection?.modes ?? [], collection && getModeId(collection),
+        mode => mode.name + (mode.id === collection.defaultModeId ? " (по умолчанию)" : ""));
+      elements.search.disabled = !collection?.tokens.length;
+      if (activeView === "tree") renderTree(collection);
+    }
+
+    function finishLoading() {
+      clearTimeout(timer);
+      loading = false;
+      elements.refresh.disabled = false;
+      elements.download.disabled = !architecture;
+    }
+
+    function loadError(message) {
+      finishLoading();
+      elements.status.textContent = architecture ? "Показана последняя успешная загрузка" : "";
+      setOptions(elements.collection, Array.from(collections.values()), elements.collection.value);
+      render();
+      showMessage(message, true);
+    }
+
+    function applyArchitecture(data) {
+      architecture = data;
+      const selectedId = elements.collection.value;
+      collections = new Map(data.collections.map(collection => [collection.id, collection]));
+      tokens = new Map(data.collections.flatMap(collection =>
+        collection.tokens.map(token => [token.id, { token, collection }])
+      ));
+      elements.stats.textContent = "Коллекции: " + collections.size + " · Токены: " + tokens.size;
+      elements.json.value = JSON.stringify(data, null, 2) + "\n";
+      elements.status.textContent = "Экспорт включает все коллекции и режимы";
+      finishLoading();
+      setOptions(elements.collection, data.collections, selectedId);
+      render();
+    }
+
+    function requestArchitecture() {
+      requestId += 1;
+      loading = true;
+      elements.refresh.disabled = true;
+      elements.collection.disabled = true;
+      elements.mode.disabled = true;
+      elements.search.disabled = true;
+      elements.download.disabled = true;
+      elements.status.textContent = "";
+      showMessage("Загружаем переменные…");
+      render();
+      timer = setTimeout(() => loadError("Pixso не ответил. Нажмите «Обновить», чтобы повторить."), 15000);
+      parent.postMessage({ pluginMessage: { type: "load-architecture", requestId } }, "*");
+    }
+
+    window.addEventListener("message", event => {
+      if (event.source !== parent) return;
+      const message = event.data?.pluginMessage;
+      if (message?.requestId !== requestId) return;
+      if (message?.type === "architecture") applyArchitecture(message.architecture);
+      if (message?.type === "architecture-error") loadError("Не удалось прочитать переменные. " + message.message);
+    });
+    elements.refresh.addEventListener("click", requestArchitecture);
+    elements.treeView.addEventListener("click", () => { activeView = "tree"; render(); });
+    elements.jsonView.addEventListener("click", () => { activeView = "json"; render(); });
+    elements.collection.addEventListener("change", render);
+    elements.mode.addEventListener("change", () => {
+      selectedModes.set(elements.collection.value, elements.mode.value);
+      render();
+    });
+    elements.search.addEventListener("input", render);
+    elements.download.addEventListener("click", () => {
+      if (!architecture) return;
+      try {
+        const file = new Blob([elements.json.value], { type: "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(file);
+        const link = node("a");
+        link.href = url;
+        link.download = "pixso-tokens.json";
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        elements.status.textContent = "Если загрузка недоступна, скопируйте содержимое вкладки JSON.";
+      } catch {
+        activeView = "json";
+        render();
+        elements.json.select();
+        elements.status.textContent = "Скопируйте выделенный JSON.";
+      }
+    });
+
+    requestArchitecture();
+  </script>
+</body>
+</html>
