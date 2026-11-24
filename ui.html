@@ -67,7 +67,7 @@
     <div class="heading">
       <div>
         <h1>Архитектура токенов</h1>
-        <p class="stats" id="stats">Локальные переменные Pixso</p>
+        <p class="stats" id="stats">Variables Pixso</p>
       </div>
       <button id="refresh">Обновить</button>
     </div>
@@ -108,6 +108,8 @@
     let loading = false;
     let timer;
     let requestId = 0;
+    let retryTimer;
+    let acknowledged = false;
 
     function node(tag, className, value) {
       const element = document.createElement(tag);
@@ -169,7 +171,9 @@
       const name = node("div", "name");
       name.append(node("strong", "", token.path.at(-1) || token.name), node("span", "type", token.type));
       const output = node("div", "value");
-      const { value, chain, issue } = resolveValue({ token, collection });
+      const { value, chain, issue } = collection.source === "library"
+        ? { chain: [], issue: "Значения доступны в файле библиотеки" }
+        : resolveValue({ token, collection });
       if (issue) {
         output.append(node("span", "status", issue));
       } else if (token.type === "COLOR" && value && [value.r, value.g, value.b].every(Number.isFinite)) {
@@ -192,10 +196,14 @@
     function renderTree(collection) {
       elements.tree.replaceChildren();
       if (!collection) {
-        showMessage("В этом файле нет локальных коллекций переменных.");
+        showMessage("Коллекции Variables не найдены. Откройте файл библиотеки или подключите её к этому файлу.");
         return;
       }
 
+      if (collection.readError) {
+        showMessage("Не удалось прочитать коллекцию. " + collection.readError, true);
+        return;
+      }
       const query = elements.search.value.trim().toLowerCase();
       const matching = collection.tokens.filter(token =>
         [token.name, token.description, token.type].some(value => value?.toLowerCase().includes(query))
@@ -250,6 +258,7 @@
 
     function finishLoading() {
       clearTimeout(timer);
+      clearTimeout(retryTimer);
       loading = false;
       elements.refresh.disabled = false;
       elements.download.disabled = !architecture;
@@ -258,9 +267,15 @@
     function loadError(message) {
       finishLoading();
       elements.status.textContent = architecture ? "Показана последняя успешная загрузка" : "";
-      setOptions(elements.collection, Array.from(collections.values()), elements.collection.value);
+      setOptions(elements.collection, Array.from(collections.values()), elements.collection.value, collectionLabel);
       render();
       showMessage(message, true);
+    }
+
+    function collectionLabel(collection) {
+      return collection.source === "library"
+        ? (collection.libraryName || "Библиотека") + " / " + collection.name
+        : collection.name + " (файл)";
     }
 
     function applyArchitecture(data) {
@@ -272,14 +287,15 @@
       ));
       elements.stats.textContent = "Коллекции: " + collections.size + " · Токены: " + tokens.size;
       elements.json.value = JSON.stringify(data, null, 2) + "\n";
-      elements.status.textContent = "Экспорт включает все коллекции и режимы";
+      elements.status.textContent = data.warnings?.join(" · ") || "Экспорт включает все найденные коллекции";
       finishLoading();
-      setOptions(elements.collection, data.collections, selectedId);
+      setOptions(elements.collection, data.collections, selectedId, collectionLabel);
       render();
     }
 
     function requestArchitecture() {
       requestId += 1;
+      acknowledged = false;
       loading = true;
       elements.refresh.disabled = true;
       elements.collection.disabled = true;
@@ -289,14 +305,27 @@
       elements.status.textContent = "";
       showMessage("Загружаем переменные…");
       render();
-      timer = setTimeout(() => loadError("Pixso не ответил. Нажмите «Обновить», чтобы повторить."), 15000);
-      parent.postMessage({ pluginMessage: { type: "load-architecture", requestId } }, "*");
+      const message = { type: "load-architecture", requestId };
+      timer = setTimeout(() => loadError("Нет связи между окном плагина и Pixso. Закройте окно и запустите плагин снова."), 10000);
+      parent.postMessage({ pluginMessage: message }, "*");
+      retryTimer = setTimeout(() => {
+        if (loading && !acknowledged) {
+          parent.postMessage({ pluginMessage: message }, "*");
+          parent.postMessage(message, "*");
+        }
+      }, 650);
     }
 
     window.addEventListener("message", event => {
-      if (event.source !== parent) return;
-      const message = event.data?.pluginMessage;
-      if (message?.requestId !== requestId) return;
+      const message = event.data?.pluginMessage ?? event.data;
+      if (!loading || message?.requestId !== requestId) return;
+      if (message.type === "architecture-loading" && !acknowledged) {
+        acknowledged = true;
+        clearTimeout(timer);
+        clearTimeout(retryTimer);
+        showMessage("Читаем файл и подключённые библиотеки Variables…");
+        timer = setTimeout(() => loadError("Pixso запустил сканирование, но API Variables не завершил чтение. Попробуйте открыть файл-источник библиотеки."), 60000);
+      }
       if (message?.type === "architecture") applyArchitecture(message.architecture);
       if (message?.type === "architecture-error") loadError("Не удалось прочитать переменные. " + message.message);
     });
@@ -321,7 +350,6 @@
         link.click();
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-        elements.status.textContent = "Если загрузка недоступна, скопируйте содержимое вкладки JSON.";
       } catch {
         activeView = "json";
         render();

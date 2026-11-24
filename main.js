@@ -20,7 +20,7 @@ function serializeToken(variable) {
   };
 }
 
-async function readArchitecture() {
+async function readLocalArchitecture() {
   const api = pixso.variables;
   if (typeof api?.getLocalVariableCollectionsAsync !== "function" ||
       typeof api.getLocalVariablesAsync !== "function") {
@@ -64,15 +64,63 @@ async function readArchitecture() {
   };
 }
 
-pixso.ui.onmessage = async message => {
+async function readLibraryCollections() {
+  const api = pixso.teamLibrary;
+  if (typeof api?.getAvailableLibraryVariableCollectionsAsync !== "function" ||
+      typeof api.getVariablesInLibraryCollectionAsync !== "function") {
+    throw new Error("API подключённых библиотек Variables недоступен.");
+  }
+  const collections = await api.getAvailableLibraryVariableCollectionsAsync();
+  return Promise.all(collections.map(async collection => {
+    const item = {
+      id: "library:" + collection.key,
+      key: collection.key,
+      name: collection.name,
+      libraryName: collection.libraryName,
+      source: "library",
+      modes: [],
+      tokens: []
+    };
+    try {
+      const variables = await api.getVariablesInLibraryCollectionAsync(collection.key);
+      item.tokens = variables.map(variable => ({
+        id: "library:" + variable.key,
+        key: variable.key,
+        name: variable.name,
+        path: variable.name.split("/"),
+        type: variable.resolvedType,
+        valuesByMode: {}
+      }));
+    } catch (error) {
+      item.readError = String(error?.message ?? error);
+    }
+    return item;
+  }));
+}
+
+let latestRequestId;
+pixso.ui.onmessage = async incoming => {
+  const message = incoming?.pluginMessage ?? incoming;
   if (message?.type !== "load-architecture") return;
   const { requestId } = message;
-  try {
-    const architecture = await readArchitecture();
-    pixso.ui.postMessage({ type: "architecture", requestId, architecture });
-  } catch (error) {
-    pixso.ui.postMessage({ type: "architecture-error", requestId, message: String(error?.message ?? error) });
+  pixso.ui.postMessage({ type: "architecture-loading", requestId });
+  if (latestRequestId === requestId) return;
+  latestRequestId = requestId;
+
+  const [local, library] = await Promise.allSettled([readLocalArchitecture(), readLibraryCollections()]);
+  const warnings = [];
+  if (local.status === "rejected") warnings.push("Локальные переменные: " + String(local.reason?.message ?? local.reason));
+  if (library.status === "rejected") warnings.push("Подключённые библиотеки: " + String(library.reason?.message ?? library.reason));
+  if (local.status === "rejected" && library.status === "rejected") {
+    pixso.ui.postMessage({ type: "architecture-error", requestId, message: warnings.join(" · ") });
+    return;
   }
+  const collections = local.value?.collections.map(collection => ({ ...collection, source: "local" })) ?? [];
+  for (const collection of library.value ?? []) {
+    if (collection.readError) warnings.push(collection.name + ": " + collection.readError);
+    collections.push(collection);
+  }
+  pixso.ui.postMessage({ type: "architecture", requestId, architecture: { schemaVersion: 2, collections, warnings } });
 };
 
 pixso.showUI(__html__, {
