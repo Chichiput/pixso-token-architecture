@@ -26,10 +26,11 @@
     .views { justify-content: flex-start; margin: 13px 0; }
     .views button { border: 0; padding: 6px 12px; background: transparent; color: var(--muted); }
     .views button[aria-pressed="true"] { background: var(--accent-light); color: var(--accent); font-weight: 650; }
+    .local-only { display: flex; align-items: center; gap: 6px; margin-left: auto; }
     .filters { display: grid; grid-template-columns: 1.2fr 1fr 1.45fr; gap: 10px; }
     label { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
     button, input, select { border: 1px solid var(--line); border-radius: 7px; font: inherit; color: var(--ink); background: white; }
-    input, select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; font-size: 13px; }
+    input[type="search"], select { width: 100%; min-width: 0; height: 34px; padding: 0 8px; font-size: 13px; }
     button { padding: 7px 12px; cursor: pointer; }
     button:disabled { cursor: default; opacity: .5; }
     :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -74,6 +75,7 @@
     <nav class="views" aria-label="Вид предпросмотра">
       <button id="tree-view" aria-pressed="true">Дерево токенов</button>
       <button id="json-view" aria-pressed="false">JSON</button>
+      <label class="local-only"><input id="local-only" type="checkbox">Только локальные переменные</label>
     </nav>
     <div class="filters" id="filters">
       <label>Коллекция<select id="collection" disabled></select></label>
@@ -98,7 +100,7 @@
       stats: byId("stats"), refresh: byId("refresh"), message: byId("message"),
       treeView: byId("tree-view"), jsonView: byId("json-view"), filters: byId("filters"),
       collection: byId("collection"), mode: byId("mode"), search: byId("search"),
-      tree: byId("tree"), json: byId("json"), status: byId("status"), download: byId("download")
+      localOnly: byId("local-only"), tree: byId("tree"), json: byId("json"), status: byId("status"), download: byId("download")
     };
     const selectedModes = new Map();
     let architecture;
@@ -138,21 +140,9 @@
       return entry.collection.name + " / " + entry.token.name;
     }
 
-    function resolveValue(entry) {
-      const chain = [];
-      const visited = new Set();
-      while (entry) {
-        const { collection, token } = entry;
-        if (visited.has(token.id)) return { chain, issue: "Циклическая ссылка" };
-        visited.add(token.id);
-        const value = token.valuesByMode[getModeId(collection)];
-        if (!isAlias(value)) {
-          return value === undefined ? { chain, issue: "Нет значения для режима" } : { chain, value };
-        }
-        entry = tokens.get(value.id);
-        chain.push(entry ? qualifiedName(entry) : value.id);
-      }
-      return { chain, issue: "Цель вне локальных коллекций или недоступна" };
+    function describeAlias(value) {
+      const target = tokens.get(value.id);
+      return target ? qualifiedName(target) : value.id;
     }
 
     function colorValue(value) {
@@ -171,11 +161,13 @@
       const name = node("div", "name");
       name.append(node("strong", "", token.path.at(-1) || token.name), node("span", "type", token.type));
       const output = node("div", "value");
-      const { value, chain, issue } = collection.source === "library"
-        ? { chain: [], issue: "Значения доступны в файле библиотеки" }
-        : resolveValue({ token, collection });
-      if (issue) {
-        output.append(node("span", "status", issue));
+      const value = token.valuesByMode[getModeId(collection)];
+      if (isAlias(value)) {
+        output.append(node("code", "", "→ " + describeAlias(value)));
+      } else if (collection.source === "library") {
+        output.append(node("span", "status", "Значения доступны в файле библиотеки"));
+      } else if (value === undefined) {
+        output.append(node("span", "status", "Нет значения для режима"));
       } else if (token.type === "COLOR" && value && [value.r, value.g, value.b].every(Number.isFinite)) {
         const color = colorValue(value);
         const swatch = node("span", "swatch");
@@ -188,7 +180,6 @@
         output.append(node("code", "", typeof value === "string" ? JSON.stringify(value) : String(value)));
       }
       row.append(name, output);
-      if (chain.length) row.append(node("div", "path", "→ " + chain.join(" → ")));
       if (token.description) row.append(node("div", "description", token.description));
       return row;
     }
@@ -294,6 +285,8 @@
     }
 
     function requestArchitecture() {
+      clearTimeout(timer);
+      clearTimeout(retryTimer);
       requestId += 1;
       acknowledged = false;
       loading = true;
@@ -305,7 +298,7 @@
       elements.status.textContent = "";
       showMessage("Загружаем переменные…");
       render();
-      const message = { type: "load-architecture", requestId };
+      const message = { type: "load-architecture", requestId, localOnly: elements.localOnly.checked };
       timer = setTimeout(() => loadError("Нет связи между окном плагина и Pixso. Закройте окно и запустите плагин снова."), 10000);
       parent.postMessage({ pluginMessage: message }, "*");
       retryTimer = setTimeout(() => {
@@ -323,13 +316,19 @@
         acknowledged = true;
         clearTimeout(timer);
         clearTimeout(retryTimer);
-        showMessage("Читаем файл и подключённые библиотеки Variables…");
+        showMessage(elements.localOnly.checked ? "Читаем локальные переменные…" : "Читаем файл и подключённые библиотеки Variables…");
         timer = setTimeout(() => loadError("Pixso запустил сканирование, но API Variables не завершил чтение. Попробуйте открыть файл-источник библиотеки."), 60000);
       }
       if (message?.type === "architecture") applyArchitecture(message.architecture);
       if (message?.type === "architecture-error") loadError("Не удалось прочитать переменные. " + message.message);
     });
     elements.refresh.addEventListener("click", requestArchitecture);
+    elements.localOnly.addEventListener("change", () => {
+      architecture = undefined;
+      collections = new Map();
+      elements.collection.replaceChildren();
+      requestArchitecture();
+    });
     elements.treeView.addEventListener("click", () => { activeView = "tree"; render(); });
     elements.jsonView.addEventListener("click", () => { activeView = "json"; render(); });
     elements.collection.addEventListener("change", render);

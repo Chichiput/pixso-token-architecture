@@ -102,12 +102,12 @@ let latestRequestId;
 pixso.ui.onmessage = async incoming => {
   const message = incoming?.pluginMessage ?? incoming;
   if (message?.type !== "load-architecture") return;
-  const { requestId } = message;
+  const { requestId, localOnly } = message;
   pixso.ui.postMessage({ type: "architecture-loading", requestId });
   if (latestRequestId === requestId) return;
   latestRequestId = requestId;
 
-  const [local, library] = await Promise.allSettled([readLocalArchitecture(), readLibraryCollections()]);
+  const [local, library] = await Promise.allSettled([readLocalArchitecture(), localOnly ? Promise.resolve([]) : readLibraryCollections()]);
   const warnings = [];
   if (local.status === "rejected") warnings.push("Локальные переменные: " + String(local.reason?.message ?? local.reason));
   if (library.status === "rejected") warnings.push("Подключённые библиотеки: " + String(library.reason?.message ?? library.reason));
