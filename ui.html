@@ -27,6 +27,10 @@
     .views button { border: 0; padding: 6px 12px; background: transparent; color: var(--muted); }
     .views button[aria-pressed="true"] { background: var(--accent-light); color: var(--accent); font-weight: 650; }
     .local-only { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+    .matching { margin-top: 8px; }
+    .matching p { margin: 4px 0; }
+    .matching > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+    .value select { max-width: 100%; }
     .filters { display: grid; grid-template-columns: 1.2fr 1fr 1.45fr; gap: 10px; }
     label { min-width: 0; display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
     button, input, select { border: 1px solid var(--line); border-radius: 7px; font: inherit; color: var(--ink); background: white; }
@@ -82,6 +86,16 @@
       <label>Режим<select id="mode" disabled></select></label>
       <label>Поиск<input id="search" type="search" placeholder="Имя, путь или описание" disabled></label>
     </div>
+    <details class="matching" id="matching" hidden>
+      <summary>Восстановить ссылки по HEX</summary>
+      <p class="status">Если обе группы в одной коллекции, укажите префикс семантической группы. Выбор примитива сохраняется до закрытия окна.</p>
+      <div>
+        <label>Коллекция примитивов<select id="primitive"></select></label>
+        <label>Семантическая коллекция<select id="semantic"></select></label>
+        <label>Префикс группы примитивов<input id="primitive-path" type="search" placeholder="Например, primitives"></label>
+        <label>Префикс семантической группы<input id="semantic-path" type="search" placeholder="Например, semantic"></label>
+      </div>
+    </details>
   </header>
   <main>
     <p class="empty" id="message" role="status">Загружаем переменные…</p>
@@ -100,9 +114,13 @@
       stats: byId("stats"), refresh: byId("refresh"), message: byId("message"),
       treeView: byId("tree-view"), jsonView: byId("json-view"), filters: byId("filters"),
       collection: byId("collection"), mode: byId("mode"), search: byId("search"),
+      matching: byId("matching"), primitive: byId("primitive"), semantic: byId("semantic"),
+      primitivePath: byId("primitive-path"), semanticPath: byId("semantic-path"),
       localOnly: byId("local-only"), tree: byId("tree"), json: byId("json"), status: byId("status"), download: byId("download")
     };
     const selectedModes = new Map();
+    const aliasChoices = new Map();
+    let matches = new Map();
     let architecture;
     let collections = new Map();
     let tokens = new Map();
@@ -156,13 +174,95 @@
       };
     }
 
+    function colorKey(value) {
+      if (!value || ![value.r, value.g, value.b, value.a ?? 1].every(Number.isFinite)) return;
+      return colorValue(value).label.split(" · ")[0] + ":" + Math.round((value.a ?? 1) * 255);
+    }
+
+    function inGroup(token, input) {
+      const prefix = input.value.trim().replace(/\/+$/, "");
+      return !prefix || token.name.startsWith(prefix + "/");
+    }
+
+    function matchKey(token, modeId) {
+      return JSON.stringify([token.id, modeId]);
+    }
+
+    function updateMatches() {
+      matches = new Map();
+      if (!architecture) return;
+      const primitive = collections.get(elements.primitive.value);
+      const semantic = collections.get(elements.semantic.value);
+      const inferredAliases = [];
+      const unresolvedMatches = [];
+      if (primitive && semantic) {
+        const candidates = primitive.tokens.filter(token => token.type === "COLOR" && inGroup(token, elements.primitivePath));
+        const sources = semantic.tokens.filter(token => token.type === "COLOR" && inGroup(token, elements.semanticPath));
+        for (const mode of semantic.modes) {
+          // Within a collection use the same mode. Across collections use a unique name match or the default.
+          const sameName = primitive.modes.filter(item => item.name === mode.name);
+          const primitiveMode = primitive === semantic ? mode.id
+            : sameName.length === 1 ? sameName[0].id : primitive.defaultModeId;
+          const byColor = new Map();
+          for (const token of candidates) {
+            const color = colorKey(token.valuesByMode[primitiveMode]);
+            if (!color) continue;
+            if (!byColor.has(color)) byColor.set(color, []);
+            byColor.get(color).push(token);
+          }
+          for (const token of sources) {
+            const color = colorKey(token.valuesByMode[mode.id]);
+            const options = (byColor.get(color) ?? []).filter(candidate => candidate.id !== token.id &&
+              (primitive !== semantic || !inGroup(candidate, elements.semanticPath)));
+            if (!options.length) continue;
+            const key = matchKey(token, mode.id);
+            const target = options.length === 1 ? options[0] : options.find(item => item.id === aliasChoices.get(key));
+            matches.set(key, { options, target });
+            if (target) {
+              inferredAliases.push({ tokenId: token.id, modeId: mode.id, targetId: target.id,
+                method: options.length === 1 ? "hex" : "manual" });
+            } else {
+              unresolvedMatches.push({ tokenId: token.id, modeId: mode.id, candidateIds: options.map(item => item.id) });
+            }
+          }
+        }
+      }
+      const inferredByKey = new Map(inferredAliases.map(item => [JSON.stringify([item.tokenId, item.modeId]), item]));
+      const exported = architecture.collections.map(collection => ({
+        ...collection,
+        tokens: collection.tokens.map(token => ({
+          ...token,
+          valuesByMode: Object.fromEntries(Object.entries(token.valuesByMode).map(([modeId, value]) => {
+            const match = inferredByKey.get(matchKey(token, modeId));
+            return [modeId, match ? { type: "VARIABLE_ALIAS", id: match.targetId } : value];
+          }))
+        }))
+      }));
+      elements.json.value = JSON.stringify({ ...architecture, collections: exported, inferredAliases, unresolvedMatches }, null, 2) + "\n";
+    }
+
     function renderToken(token, collection) {
       const row = node("div", "token");
       const name = node("div", "name");
       name.append(node("strong", "", token.path.at(-1) || token.name), node("span", "type", token.type));
       const output = node("div", "value");
-      const value = token.valuesByMode[getModeId(collection)];
-      if (isAlias(value)) {
+      const modeId = getModeId(collection);
+      const key = matchKey(token, modeId);
+      const value = token.valuesByMode[modeId];
+      const match = matches.get(key);
+      if (match?.options.length > 1) {
+        const select = node("select");
+        select.setAttribute("aria-label", "Выбрать примитив для " + token.name);
+        setOptions(select, [{ id: "", name: "Выберите примитив" }, ...match.options],
+          match.target?.id ?? "", item => item.id ? describeAlias(item) : item.name);
+        select.addEventListener("change", () => {
+          aliasChoices.set(key, select.value);
+          updateMatches();
+        });
+        output.append(select);
+      } else if (match?.target) {
+        output.append(node("code", "", "→ " + describeAlias(match.target) + " · по HEX"));
+      } else if (isAlias(value)) {
         output.append(node("code", "", "→ " + describeAlias(value)));
       } else if (collection.source === "library") {
         output.append(node("span", "status", "Значения доступны в файле библиотеки"));
@@ -257,6 +357,7 @@
 
     function loadError(message) {
       finishLoading();
+      elements.matching.hidden = !architecture;
       elements.status.textContent = architecture ? "Показана последняя успешная загрузка" : "";
       setOptions(elements.collection, Array.from(collections.values()), elements.collection.value, collectionLabel);
       render();
@@ -277,9 +378,14 @@
         collection.tokens.map(token => [token.id, { token, collection }])
       ));
       elements.stats.textContent = "Коллекции: " + collections.size + " · Токены: " + tokens.size;
-      elements.json.value = JSON.stringify(data, null, 2) + "\n";
-      elements.status.textContent = data.warnings?.join(" · ") || "Экспорт включает все найденные коллекции";
+      const local = data.collections.filter(collection => collection.source !== "library");
+      const keep = select => setOptions(select, [{ id: "", name: "Не выбрана" }, ...local], select.value);
       finishLoading();
+      keep(elements.primitive);
+      keep(elements.semantic);
+      elements.matching.hidden = !local.length;
+      updateMatches();
+      elements.status.textContent = data.warnings?.join(" · ") || "Экспорт включает все найденные коллекции";
       setOptions(elements.collection, data.collections, selectedId, collectionLabel);
       render();
     }
@@ -290,6 +396,7 @@
       requestId += 1;
       acknowledged = false;
       loading = true;
+      elements.matching.hidden = true;
       elements.refresh.disabled = true;
       elements.collection.disabled = true;
       elements.mode.disabled = true;
@@ -337,6 +444,16 @@
       render();
     });
     elements.search.addEventListener("input", render);
+    for (const control of [elements.primitive, elements.semantic, elements.primitivePath, elements.semanticPath]) {
+      control.addEventListener("change", () => {
+        updateMatches();
+        if (elements.semantic.value) {
+          elements.collection.value = elements.semantic.value;
+          activeView = "tree";
+        }
+        render();
+      });
+    }
     elements.download.addEventListener("click", () => {
       if (!architecture) return;
       try {
